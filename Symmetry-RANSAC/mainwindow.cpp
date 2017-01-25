@@ -3,10 +3,11 @@
 #include <QMessageBox>
 #include <QFileDialog>
 #include <QDebug>
-#include <qmath.h>
-#include <qopengl.h>
 #include <QVector>
 #include <QVector3D>
+#include <QDirIterator>
+#include <qmath.h>
+#include <qopengl.h>
 #include <cstdlib>
 #include <iostream>
 #include <fstream>
@@ -28,7 +29,6 @@
 #include "Properties.h"
 #include "HarrisDetector.h"
 #include "optdialog.h"
-//#include "alignmentdialog.h"
 #include "core.h"
 #include "simplify.h"
 #include "obj.h"
@@ -75,7 +75,7 @@ MainWindow::MainWindow()
     connect(completion, SIGNAL(triggered()), this, SLOT(onCompletion()));
     setMenuBar(menuBar);
 
-    onCompletion();
+    onScript();
 }
 
 double calculateEdge(Harris3D::Vertex * i, Harris3D::Vertex * j){
@@ -302,8 +302,6 @@ void outputInliers(string filename){
     }
     out1.close();
 }
-
-
 
 void segmentateMesh(Harris3D::Mesh * mesh, vector<Harris3D::Mesh *>& meshes){
     //Create output file
@@ -649,9 +647,6 @@ void detectPointsInPlane(Harris3D::Mesh * mesh, vector<float>& plane, vector<int
     }
 }
 
-void fillHole(Harris3D::Mesh * mesh, vector<float>& center, vector<float>& directionVector){
-
-}
 
 void MainWindow::onCompletion(){
     if (!centralWidget()){
@@ -716,9 +711,9 @@ void MainWindow::onCompletion(){
             }
 
             //Fill hole
-            if (atoi(prop.getProperty("fill-hole").c_str())==1){
-                fillHole(meshes.at(0),center,directionVector);
-            }
+//            if (atoi(prop.getProperty("fill-hole").c_str())==1){
+//                fillHole(meshes.at(0),center,directionVector);
+//            }
 
             //Rebuild mesh
             Shape::mesh = mergeMeshes(meshes);
@@ -742,6 +737,85 @@ void MainWindow::onCompletion(){
             //Clean data
             //Shape::mesh->cleanMesh();
             //Shape::interestPoints.clear();
+        }
+    }
+    else
+        QMessageBox::information(0, tr("Cannot add new window"), tr("Already occupied. Undock first."));
+}
+
+void MainWindow::onScript(){
+    if (!centralWidget()){
+        QString dir = QFileDialog::getExistingDirectory(this, tr("Open Directory"), "/home");
+        if (dir.isEmpty()){
+            QMessageBox::information(0, "error", "No directory chosen");
+        }
+        else{
+            //Set properties
+            Util::Properties prop;
+            OptDialog mDialog(&prop);
+            QDirIterator it(dir, QStringList() << "*.off", QDir::Files, QDirIterator::Subdirectories);
+            while (it.hasNext()){
+              //Load mesh to memory
+              QString filename = it.next();
+              cout << filename << endl;
+              Shape::mesh = new Harris3D::Mesh(filename.toUtf8().constData());
+
+              //Get basename
+              QString basename = filename.split(".",QString::SkipEmptyParts).at(0);
+
+              //Apply openvdb
+              if (atoi(prop.getProperty("openvdb").c_str()) == 1){
+                  openVDB(Shape::mesh);
+              }
+
+              //Decimate if mesh is complex
+              if (atoi(prop.getProperty("decimate").c_str()) == 1){
+                  decimate(Shape::mesh,20000);
+              }
+
+              //Segmentate mesh
+              vector<Harris3D::Mesh *> meshes;
+              if (atoi(prop.getProperty("segmentate").c_str()) == 1){
+                  segmentateMesh(Shape::mesh, meshes);
+              }
+              else{
+                  meshes.push_back(Shape::mesh);
+              }
+
+              //Find interest points
+              vector<float> center;
+              vector<float> directionVector;
+              ransac(meshes.at(0), center, directionVector, prop);
+
+              //Show interest points
+              if (atoi(prop.getProperty("keypoints").c_str())==1){
+                  Shape::interestPoints.clear();
+              }
+
+
+              //Rotate mesh
+              double alpha = atof(prop.getProperty("alpha").c_str());
+              int rotationFactor = atoi(prop.getProperty("rotation").c_str());
+              if (atoi(prop.getProperty("alignment").c_str())==1){
+                  alignMeshes(meshes.at(0), center, directionVector, alpha, rotationFactor);
+              }
+              else{
+                  reconstructMesh(meshes.at(0), center, directionVector, alpha, rotationFactor);
+              }
+
+              //Rebuild mesh
+              Shape::mesh = mergeMeshes(meshes);
+
+              //Output mesh
+              QString outfile = basename + "_output.off";
+              cout << outfile << endl;
+              outputMesh(Shape::mesh, outfile.toUtf8().constData());
+
+              //Clean mesh
+              Shape::interestPoints.clear();
+              Shape::mesh->cleanMesh();
+            }
+            QMessageBox::information(0, tr("Exito"), tr("Exito"));
         }
     }
     else
@@ -970,7 +1044,7 @@ void MainWindow::onOpen()
             //Clean
             Shape::mesh->cleanMesh();
             Shape::interestPoints.clear();
-        } 
+        }
     }
     else
         QMessageBox::information(0, tr("Cannot add new window"), tr("Already occupied. Undock first."));
