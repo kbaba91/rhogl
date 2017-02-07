@@ -3,10 +3,11 @@
 #include <QMessageBox>
 #include <QFileDialog>
 #include <QDebug>
-#include <qmath.h>
-#include <qopengl.h>
 #include <QVector>
 #include <QVector3D>
+#include <QDirIterator>
+#include <qmath.h>
+#include <qopengl.h>
 #include <cstdlib>
 #include <iostream>
 #include <fstream>
@@ -28,13 +29,13 @@
 #include "Properties.h"
 #include "HarrisDetector.h"
 #include "optdialog.h"
-//#include "alignmentdialog.h"
 #include "core.h"
 #include "simplify.h"
 #include "obj.h"
 #include "omp.h"
 
 #include <boost/thread/thread.hpp>
+#include <boost/filesystem.hpp>
 #include <Eigen/IterativeLinearSolvers>
 #include <pcl/point_types.h>
 #include <pcl/sample_consensus/ransac.h>
@@ -75,7 +76,7 @@ MainWindow::MainWindow()
     connect(completion, SIGNAL(triggered()), this, SLOT(onCompletion()));
     setMenuBar(menuBar);
 
-    onCompletion();
+    onScript();
 }
 
 double calculateEdge(Harris3D::Vertex * i, Harris3D::Vertex * j){
@@ -303,8 +304,6 @@ void outputInliers(string filename){
     out1.close();
 }
 
-
-
 void segmentateMesh(Harris3D::Mesh * mesh, vector<Harris3D::Mesh *>& meshes){
     //Create output file
     outputMesh(mesh, "output.off");
@@ -446,14 +445,6 @@ void reconstructMesh(Harris3D::Mesh * mesh, vector<float>& center, vector<float>
 
         Harris3D::Mesh * auxMesh = rotateMesh(mesh, angle, center, directionVector);
 
-        for (int i = 0; i<auxMesh->getNumVertices();i++){
-            Harris3D::Vertex q = auxMesh->getVertices()[i];
-            Harris3D::Vertex v = calculateClosestCompatiblePoint(auxMesh, i, mesh);
-            if (calculateEdge(&q,&v)<alpha){
-                auxMesh->getVertices()[i] = v;
-            }
-        }
-
         //Add vertices to newVertices
         int offset = nLoop * mesh->getNumVertices();
         for (int i=0; i< mesh->getNumVertices();i++){
@@ -586,7 +577,14 @@ float calculatePointLineDistance(vector<float>& point, vector<float>& linePoint,
     v1.push_back(point.at(2)-linePoint.at(2));
     vector<float> v1xv2;
     calculateCrossProduct(v1,lineVector,v1xv2);
-    return (calculateMagnitude(v1xv2)/calculateMagnitude(lineVector));
+    float sign = v1[0]*lineVector[0]+v1[1]*lineVector[1]+v1[2]*lineVector[2];
+    if (sign > 0){
+        return (calculateMagnitude(v1xv2)/calculateMagnitude(lineVector));
+    }
+    else{
+        return 1000.0;
+    }
+    
 }
 
 void makeUnitVector(vector<float>& v){
@@ -649,9 +647,6 @@ void detectPointsInPlane(Harris3D::Mesh * mesh, vector<float>& plane, vector<int
     }
 }
 
-void fillHole(Harris3D::Mesh * mesh, vector<float>& center, vector<float>& directionVector){
-
-}
 
 void MainWindow::onCompletion(){
     if (!centralWidget()){
@@ -716,9 +711,9 @@ void MainWindow::onCompletion(){
             }
 
             //Fill hole
-            if (atoi(prop.getProperty("fill-hole").c_str())==1){
-                fillHole(meshes.at(0),center,directionVector);
-            }
+//            if (atoi(prop.getProperty("fill-hole").c_str())==1){
+//                fillHole(meshes.at(0),center,directionVector);
+//            }
 
             //Rebuild mesh
             Shape::mesh = mergeMeshes(meshes);
@@ -742,6 +737,157 @@ void MainWindow::onCompletion(){
             //Clean data
             //Shape::mesh->cleanMesh();
             //Shape::interestPoints.clear();
+        }
+    }
+    else
+        QMessageBox::information(0, tr("Cannot add new window"), tr("Already occupied. Undock first."));
+}
+
+void fillHole(Harris3D::Mesh * mesh, vector<float>& center, vector<float>& directionVector){
+    //Detect closest point
+    int point = detectClosestPoint(Shape::mesh, center, directionVector);
+    //int rotationFactor = 4;
+    //int offset = Shape::mesh->getNumVertices() / 4;
+    vector<float> cPoint;
+    cPoint.push_back(Shape::mesh->getVertices()[point].getX());
+    cPoint.push_back(Shape::mesh->getVertices()[point].getY());
+    cPoint.push_back(Shape::mesh->getVertices()[point].getZ());
+
+    //Detect hole center
+    float * rotatedPoint = Rotation::rotateVertex(Shape::mesh->getVertices()[point].getX()-center[0], Shape::mesh->getVertices()[point].getY()-center[1], Shape::mesh->getVertices()[point].getZ()-center[2], 180.0, directionVector[0], directionVector[1], directionVector[2]);
+    vector<float> holeCenter;
+    holeCenter.push_back((Shape::mesh->getVertices()[point].getX()+rotatedPoint[0]+center[0])/2);
+    holeCenter.push_back((Shape::mesh->getVertices()[point].getY()+rotatedPoint[1]+center[1])/2);
+    holeCenter.push_back((Shape::mesh->getVertices()[point].getZ()+rotatedPoint[2]+center[2])/2);
+
+    //Detect hole edge
+    vector<int> hole;
+
+    for(float i = 0; i < 360.0; i += 10.0){
+        float * auxPoint = Rotation::rotateVertex(Shape::mesh->getVertices()[point].getX()-center[0], Shape::mesh->getVertices()[point].getY()-center[1], Shape::mesh->getVertices()[point].getZ()-center[2], i , directionVector[0], directionVector[1], directionVector[2]);
+        vector<float> direction;
+        direction.push_back(auxPoint[0]+center[0]-holeCenter[0]);
+        direction.push_back(auxPoint[1]+center[1]-holeCenter[1]);
+        direction.push_back(auxPoint[2]+center[2]-holeCenter[2]);
+
+        hole.push_back(detectClosestPoint(Shape::mesh, holeCenter, direction));
+    }
+
+    int centerIndex = Shape::mesh->getNumVertices();
+    Shape::mesh->insertVertex(centerIndex, holeCenter[0], holeCenter[1], holeCenter[2]);
+
+    //Fill hole
+    for(int j = 0; j<hole.size(); j++){
+        if (j==0){
+            Shape::mesh->insertFace(Shape::mesh->getNumFaces(), hole[hole.size()-1], centerIndex, hole[j]);
+        }
+        else{
+            Shape::mesh->insertFace(Shape::mesh->getNumFaces(), hole[j-1], centerIndex, hole[j]);
+        }
+    }
+}
+
+void MainWindow::onScript(){
+    if (!centralWidget()){
+        QString dir = QFileDialog::getExistingDirectory(this, tr("Open Directory"), "/home");
+        if (dir.isEmpty()){
+            QMessageBox::information(0, "error", "No directory chosen");
+        }
+        else{
+            //Set properties
+            Util::Properties prop;
+            OptDialog mDialog(&prop);
+            QDirIterator it(dir, QStringList() << "*.off", QDir::Files, QDirIterator::Subdirectories);
+            while (it.hasNext()){
+                //Load mesh to memory
+                QString filename = it.next();
+                cout << filename.toUtf8().constData() << endl;
+                try{
+                    Shape::mesh = new Harris3D::Mesh(filename.toUtf8().constData());
+
+                    //Get basename
+                    std::string basename = boost::filesystem::basename(filename.toUtf8().constData());
+
+                    //Apply openvdb
+                    if (atoi(prop.getProperty("openvdb").c_str()) == 1){
+                        openVDB(Shape::mesh);
+                    }
+
+                    //Decimate if mesh is complex
+                    if (atoi(prop.getProperty("decimate").c_str()) == 1){
+                        decimate(Shape::mesh,20000);
+                    }
+
+                    //Segmentate mesh
+                    vector<Harris3D::Mesh *> meshes;
+                    if (atoi(prop.getProperty("segmentation").c_str()) == 1){
+                        segmentateMesh(Shape::mesh, meshes);
+                    }
+                    else{
+                        meshes.push_back(Shape::mesh);
+                    }
+
+                    //Find interest points
+                    vector<float> center;
+                    vector<float> directionVector;
+                    ransac(meshes.at(0), center, directionVector, prop);
+
+                    //Show interest points
+                    if (atoi(prop.getProperty("keypoints").c_str())==1){
+                        Shape::interestPoints.clear();
+                    }
+
+
+                    //Rotate mesh
+                    double alpha = atof(prop.getProperty("alpha").c_str());
+                    int rotationFactor = atoi(prop.getProperty("rotation").c_str());
+                    if (atoi(prop.getProperty("alignment").c_str())==1){
+                        alignMeshes(meshes.at(0), center, directionVector, alpha, rotationFactor);
+                    }
+                    else{
+                        reconstructMesh(meshes.at(0), center, directionVector, alpha, rotationFactor);
+//                        int nLoop = 0;
+//                        for (int j=0; j<360;j+=360/rotationFactor){
+//                            float angle = (float) j;
+                            
+//                            Harris3D::Mesh * auxMesh = rotateMesh(meshes.at(0), angle, center, directionVector);
+                            
+//                            //Output mesh
+//                            std::string outfile = basename + "_output" + std::to_string(nLoop) + ".off";
+//                            cout << outfile << endl;
+//                            outputMesh(Shape::mesh, outfile);
+                            
+//                            cout << "Loop: " << nLoop << endl;
+//                            nLoop++;
+//                        }
+                        
+                    }
+
+                    //Fill hole
+                    if (atoi(prop.getProperty("hole-filling").c_str())==1){
+                        fillHole(meshes.at(0),center,directionVector);
+                    }
+
+                    //Rebuild mesh
+                    if (atoi(prop.getProperty("segmentation").c_str()) == 1){
+                        Shape::mesh = mergeMeshes(meshes);
+                    }
+
+
+                    //Output mesh
+                    std::string outfile = basename + "_output.off";
+                    cout << outfile << endl;
+                    outputMesh(Shape::mesh, outfile);
+                }
+                catch (int e){
+                  cout << filename.toUtf8().constData() << endl;
+                }
+
+                //Clean mesh
+                Shape::interestPoints.clear();
+                Shape::mesh->cleanMesh();
+            }
+            QMessageBox::information(0, tr("Exito"), tr("Exito"));
         }
     }
     else
@@ -777,6 +923,10 @@ void MainWindow::onHoleFilling(){
             vector<float> center;
             vector<float> directionVector;
             ransac(Shape::mesh, center, directionVector, prop);
+
+            //Reconstruct mesh
+            double alpha = atof(prop.getProperty("alpha").c_str());
+            reconstructMesh(Shape::mesh, center, directionVector, alpha, 4);
 
             //Detect closest point
             int point = detectClosestPoint(Shape::mesh, center, directionVector);
@@ -838,9 +988,6 @@ void MainWindow::onHoleFilling(){
                 planePoint.push_back(Shape::mesh->getVertices()[planePoints.at(i)].getY());
                 planePoint.push_back(Shape::mesh->getVertices()[planePoints.at(i)].getZ());
                 float distance = calculatePointPlaneDistance(normalPlane,planePoint);
-                //double dotProduct = Shape::mesh->getVertices()[planePoints.at(i)].normal[0]*Shape::mesh->getVertices()[point].normal[0]+Shape::mesh->getVertices()[planePoints.at(i)].normal[1]*Shape::mesh->getVertices()[point].normal[1]+Shape::mesh->getVertices()[planePoints.at(i)].normal[2]*Shape::mesh->getVertices()[point].normal[2];
-                //cout << Shape::mesh->getVertices()[planePoints.at(i)].normal[0] << "," << Shape::mesh->getVertices()[planePoints.at(i)].normal[1] << "," << Shape::mesh->getVertices()[planePoints.at(i)].normal[2] << endl;
-                //cout << dotProduct << endl;
                 if (calculatePointLineDistance(planePoint,center,directionVector) < cpDistance+Shape::mesh->getDiagonal()*0.04){
                     if (distance > maxDistance){
                         maxDistance = distance;
@@ -853,27 +1000,6 @@ void MainWindow::onHoleFilling(){
                 }
             }
             cout << "Min point: " << minIndex << ", Max point: "<< maxIndex << endl;
-
-            /*
-            //Detect upper hole
-            makeUnitVector(directionVector);
-            float maxDistance = 0.0;
-            int upperPoint = 0;
-            vector<float> v;
-            for (int i = 0; i< Shape::mesh->getNumVertices(); i++){
-                v.clear();
-                v.push_back(Shape::mesh->getVertices()[i].getX() - Shape::mesh->getVertices()[point].getX());
-                v.push_back(Shape::mesh->getVertices()[i].getY() - Shape::mesh->getVertices()[point].getY());
-                v.push_back(Shape::mesh->getVertices()[i].getZ() - Shape::mesh->getVertices()[point].getZ());
-                float distance = magnitude(v);
-                makeUnitVector(v);
-
-                if (distance > maxDistance && (std::abs(dotProduct(v,directionVector)) > 0.90)){
-                    maxDistance = distance;
-                    upperPoint = i;
-                }
-            }
-            */
 
             //Detect upper hole center
             rotatedPoint = Rotation::rotateVertex(Shape::mesh->getVertices()[maxIndex].getX()-center[0],Shape::mesh->getVertices()[maxIndex].getY()-center[1],Shape::mesh->getVertices()[maxIndex].getZ()-center[2],180.0,directionVector[0],directionVector[1],directionVector[2]);
@@ -893,10 +1019,6 @@ void MainWindow::onHoleFilling(){
 
                 upperHole.push_back(detectClosestPoint(Shape::mesh, upperHoleCenter, direction));
             }
-
-            //Reconstruct mesh
-            double alpha = atof(prop.getProperty("alpha").c_str());
-            reconstructMesh(Shape::mesh, center, directionVector, alpha, rotationFactor);
 
             //Fill hole
             for(int i = 0; i<rotationFactor; i++){
@@ -970,7 +1092,7 @@ void MainWindow::onOpen()
             //Clean
             Shape::mesh->cleanMesh();
             Shape::interestPoints.clear();
-        } 
+        }
     }
     else
         QMessageBox::information(0, tr("Cannot add new window"), tr("Already occupied. Undock first."));

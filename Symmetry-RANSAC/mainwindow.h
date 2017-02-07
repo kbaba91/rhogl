@@ -16,7 +16,7 @@ private Q_SLOTS:
     void onAddNew();
     void onOpen();
     void onCompletion();
-    //void onCGAL();
+    void onScript();
     void onHoleFilling();
 };
 

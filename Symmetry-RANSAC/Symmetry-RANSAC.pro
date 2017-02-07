@@ -116,7 +116,7 @@ unix {
 #-----------------BOOST------------------
 unix {
     INCLUDEPATH += /usr/include
-    LIBS += -L/usr/lib/x86_64-linux-gnu -lboost_system -lboost_iostreams -llog4cplus -lboost_thread
+    LIBS += -L/usr/lib/x86_64-linux-gnu -lboost_system -lboost_iostreams -llog4cplus -lboost_thread -lboost_filesystem
 
 }else{
 
